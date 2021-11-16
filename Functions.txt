@@ -1,0 +1,73 @@
+%% Decoding Function: Data Conversion
+
+function [AngleSC, LidarSC, SonarSC] = Decoding(valorADC)
+    % Data type
+    databytes = int8(valorADC);  
+    
+    % Sync
+    start = find(databytes > 0,1);                        
+    synceddata = databytes(start:end-mod((16-start),4)-1);
+    synceddata = typecast(synceddata,'uint8');
+    
+    % Size of each block
+    blocksize = length(synceddata)/4;                    
+    byte1 = synceddata(1:4:end);
+    byte2 = synceddata(2:4:end);
+    byte3 = synceddata(3:4:end);
+    byte4 = synceddata(4:4:end);
+    
+    % Creating masks to assign values
+    mask_pos1(1:blocksize,1) = uint8(127);                
+    mask_sonar1(1:blocksize,1) = uint8(127);
+    mask_sonar2(1:blocksize,1) = uint8(96);
+    mask_lidar1(1:blocksize,1) = uint8(31);
+    mask_lidar2(1:blocksize,1) = uint8(127);
+    
+    % Assigning position (angle)
+    AngleSC = bitand(byte1, mask_pos1);                   
+    AngleSC = single(AngleSC);
+    AngleSC = round(AngleSC,1);
+    
+    % Adding masks and assigning to Sonar and Lidar
+    sonar1 = single(bitand(byte2, mask_sonar1));          
+    sonar2 = single(bitand(byte3, mask_sonar2));
+    lidar1 = single(bitand(byte3, mask_lidar1));
+    lidar2 = single(bitand(byte4, mask_lidar2));
+    SonarSC = sonar1*4 + sonar2/32;
+    LidarSC = lidar1*128 + lidar2;
+end
+
+%% Conversion Function: Sonar and Lidar
+
+function [Angle,Lidar,Sonar] = Conversion(AngleSC,LidarSC, SonarSC)
+   % Conversion Angle
+    Steps = 96;                                          
+    PositionScale = (2 * pi()/Steps);
+    Angle = round(PositionScale * AngleSC,2);  
+    
+    % Conversión Lidar
+    LidarPol = [7.67526029129288 -108.134109245746 644.115225669854 -2113.71833279663 4175.24292278666 -5097.1909611203 3802.7451305835 -1649.81901283364 366.038219660162];
+    LidarScale = (3 / 4096) / 1.5;
+    LidarEval = polyval(LidarPol, LidarScale * LidarSC);
+    Lidar = round(LidarEval,2);
+    Lidar = Lidar - 25;
+    
+    % Conversion Sonar
+    Sonar = SonarSC * 4.74;
+end
+
+%% Fusion Function: SONAR + LIDAR
+
+function [Fusion] = Function_Fusion(Sonar, Lidar)
+   dif = Sonar(1) - Lidar(1);
+   if dif(1) > -7 && dif(1) < 7
+       Fusion = (Sonar+Lidar) / 2;
+   else
+       if dif < -7
+           Fusion = Sonar;
+       end
+       if dif > 7
+           Fusion = Lidar;
+       end
+   end
+end

@@ -1,0 +1,241 @@
+classdef SOLINDAR < matlab.apps.AppBase
+
+    % Properties that correspond to app components
+    properties (Access = public)
+        UIFigure        matlab.ui.Figure
+        SOLINDARPanel   matlab.ui.container.Panel
+        LOGSwitchLabel  matlab.ui.control.Label
+        LOGSwitch       matlab.ui.control.ToggleSwitch
+        Gauge           matlab.ui.control.Gauge
+        SONARButton     matlab.ui.control.StateButton
+        LIDARButton     matlab.ui.control.StateButton
+        FUSIONButton    matlab.ui.control.StateButton
+    end
+
+    properties (Access = private)              
+        s;                                % Serial port COM_5     
+        pax, x;                           % Buffer size
+        valorADC;                         % Data 
+        fileID;                           % Log info
+        PlotSonar, PlotLidar, PlotFusion; % Polar Axes objects
+        AngleSC, LidarSC, SonarSC;        % Variables without conversion
+        Angle, Sonar, Lidar, Fusion;      % Converted variables
+        TopGrade, Step;                   % Limit degrees and step-degree conv factor
+        Theta, DataS, DataL, DataF;       % Data vectors           
+    end                        
+
+    methods (Access = private)
+
+        % Code that executes after component creation
+        function startupFcn(app)
+            % Initializing variables
+            app.Step = 3.75;
+            app.TopGrade = 36;
+            app.AngleSC = 0;
+            app.SonarSC = 0;
+            app.LidarSC = 0;
+            app.Theta = (-app.TopGrade : app.Step : app.TopGrade); 
+            app.DataS = zeros(1, length(app.Theta));
+            app.DataL = zeros(1, length(app.Theta));
+            app.DataF = zeros(1, length(app.Theta));
+            
+            % Creating and setting the Polar Axes
+            app.pax = polaraxes(app.SOLINDARPanel);                       
+            app.pax.NextPlot = 'add';
+            app.pax.ThetaZeroLocation = 'top';
+            app.pax.ThetaDir = 'clockwise';
+            app.pax.ThetaTickLabel = {'0', '30', '60', '90', '120', '150', '180', '-150', '-120', '-90', '-60', '-30'};
+            app.pax.RLim = [0 100];
+            app.pax.RTick = 0:20:100;
+            app.pax.ThetaMinorGrid = 'on';
+            app.pax.Position = [-0.03 0.1100 0.7750 0.7750];
+            
+            % Initial plots
+            app.PlotSonar = polarscatter(app.pax, app.Theta, app.DataS,'filled','w');
+            app.PlotLidar = polarscatter(app.pax, app.Theta, app.DataL,'filled','w');
+            app.PlotFusion = polarscatter(app.pax, app.Theta, app.DataF,'filled','w');                       
+            
+            % Initializing serial port
+            app.x = 16;
+            delete(instrfind(('port'),('COM5')));
+            app.s = serial('COM5','BaudRate', 115200); 
+            set(app.s,'InputBufferSize', app.x);        
+            set(app.s,'Terminator','V');
+            set(app.s,'BytesAvailableFcnMode','byte');                                                
+            fopen(app.s);  
+        
+            while(1)
+                % Decoding
+                app.valorADC = fread(app.s, app.x, 'int8');                                
+                [app.AngleSC, app.LidarSC, app.SonarSC] = Decoding(app.valorADC);                
+                [app.Angle, app.Lidar, app.Sonar] = Conversion(app.AngleSC, app.LidarSC, app.SonarSC); 
+                
+                % Assigning data 
+                app.Theta(app.AngleSC+1) = app.Angle - 0.75 * pi; % -2.356125
+                app.Gauge.Value = round(app.AngleSC(1) * 3.75, 0) - 135;
+                app.DataS(app.AngleSC+1) = app.Sonar;
+                app.DataL(app.AngleSC+1) = app.Lidar; 
+                app.Fusion = Function_Fusion(app.Sonar, app.Lidar);                
+                app.DataF(app.AngleSC+1) = Function_Fusion(app.Sonar, app.Lidar); 
+                
+                % Plotting               
+                app.PlotSonar = polarscatter(app.pax, app.Theta, app.DataS, 'filled','b');                                 
+                app.PlotSonar.Visible = app.SONARButton.Value;
+                hold(app.pax,'on')                                               
+                app.PlotLidar = polarscatter(app.pax, app.Theta, app.DataL, 'filled','r');                
+                app.PlotLidar.Visible = app.LIDARButton.Value;
+                hold(app.pax,'on')               
+                app.PlotFusion = polarscatter(app.pax, app.Theta, app.DataF, 'filled','g');                 
+                app.PlotFusion.Visible = app.FUSIONButton.Value; 
+                hold(app.pax,'on')
+                                
+                % Reset condition on Polar Axes display              
+                if ((app.AngleSC(1) >= 29)||(app.AngleSC(1) <= 20)) 
+                     app.pax.NextPlot = 'replacechildren';
+                     refresh(app.UIFigure)                                     
+                end                
+                drawnow
+                
+                % Log whe the switch is activated
+                if strcmp(app.LOGSwitch.Value, 'On') && ~isempty(fopen(app.fileID))
+                   for i = 1:7
+                    fprintf(app.fileID,'%s, %.2f, %.2f, %.2f, %.2f\n', (datestr(datetime('now')))', round(app.Angle(i), 3)', round(app.Lidar(i), 2)', round(app.Sonar(i), 2)', round(Function_Fusion(app.Lidar(i), app.Sonar(i))', 2));
+                   end
+                end 
+            end
+        end
+
+        % Value changed function: SONARButton
+        function SONARButtonValueChanged(app, event)
+            value = app.SONARButton.Value;  
+            app.PlotSonar.Visible = value;
+        end
+
+        % Value changed function: LIDARButton
+        function LIDARButtonValueChanged(app, event)
+            value = app.LIDARButton.Value;            
+            app.PlotLidar.Visible = value;
+        end
+
+        % Value changed function: FUSIONButton
+        function FUSIONButtonValueChanged(app, event)
+            value = app.FUSIONButton.Value;
+             app.PlotFusion.Visible = value;
+        end
+
+        % Close request function: UIFigure
+        function UIFigureCloseRequest(app, event)
+            % Close serial port when the app closes
+            if isnumeric(app.s)
+            elseif strcmp(app.s.Status, 'open')
+                fclose(app.s);
+            end           
+             delete(app);
+        end
+
+        % Value changed function: LOGSwitch
+        function LOGSwitchValueChanged(app, event)
+            value = app.LOGSwitch.Value;
+            if strcmp(value, 'On')
+                % Checking existence of the log file to wirte
+                if isfile('Log.txt')
+                    app.fileID = fopen('Log.txt', 'wt+');
+                else
+                    app.fileID = fopen('Log.txt', 'wt+');
+                end
+                fseek(app.fileID, 0, 'bof');
+                fprintf(app.fileID, 'Timestamp           Position Lidar  Sonar  Fusion\n');
+                fseek(app.fileID, 0, 'eof');
+            else
+                fclose(app.fileID);
+            end 
+        end
+    end
+
+    % App initialization and construction
+    methods (Access = private)
+
+        % Create UIFigure and components
+        function createComponents(app)
+
+            % Create UIFigure
+            app.UIFigure = uifigure;
+            app.UIFigure.Position = [100 100 517 338];
+            app.UIFigure.Name = 'EC-3883: PROYECTOS III SOLINDAR';
+            app.UIFigure.CloseRequestFcn = createCallbackFcn(app, @UIFigureCloseRequest, true);
+
+            % Create SOLINDARPanel
+            app.SOLINDARPanel = uipanel(app.UIFigure);
+            app.SOLINDARPanel.Title = 'SOLINDAR_2D_VISUALIZATION_PANEL';
+            app.SOLINDARPanel.BackgroundColor = [0.9412 0.9412 0.9412];
+            app.SOLINDARPanel.FontWeight = 'bold';
+            app.SOLINDARPanel.Position = [15 13 490 312];
+
+            % Create LOGSwitchLabel
+            app.LOGSwitchLabel = uilabel(app.SOLINDARPanel);
+            app.LOGSwitchLabel.HorizontalAlignment = 'center';
+            app.LOGSwitchLabel.Position = [411 161 31 22];
+            app.LOGSwitchLabel.Text = 'LOG';
+
+            % Create LOGSwitch
+            app.LOGSwitch = uiswitch(app.SOLINDARPanel, 'toggle');
+            app.LOGSwitch.Orientation = 'horizontal';
+            app.LOGSwitch.ValueChangedFcn = createCallbackFcn(app, @LOGSwitchValueChanged, true);
+            app.LOGSwitch.Position = [403 126 45 20];
+
+            % Create Gauge
+            app.Gauge = uigauge(app.SOLINDARPanel, 'circular');
+            app.Gauge.Limits = [-150 150];
+            app.Gauge.MajorTicks = [-120 -80 -45 0 45 80 120];
+            app.Gauge.Position = [371 9 104 104];
+
+            % Create SONARButton
+            app.SONARButton = uibutton(app.SOLINDARPanel, 'state');
+            app.SONARButton.ValueChangedFcn = createCallbackFcn(app, @SONARButtonValueChanged, true);
+            app.SONARButton.Text = 'SONAR';
+            app.SONARButton.Position = [375 262 100 22];
+            app.SONARButton.Value = true;
+
+            % Create LIDARButton
+            app.LIDARButton = uibutton(app.SOLINDARPanel, 'state');
+            app.LIDARButton.ValueChangedFcn = createCallbackFcn(app, @LIDARButtonValueChanged, true);
+            app.LIDARButton.Text = 'LIDAR';
+            app.LIDARButton.Position = [375 229 100 22];
+            app.LIDARButton.Value = true;
+
+            % Create FUSIONButton
+            app.FUSIONButton = uibutton(app.SOLINDARPanel, 'state');
+            app.FUSIONButton.ValueChangedFcn = createCallbackFcn(app, @FUSIONButtonValueChanged, true);
+            app.FUSIONButton.Text = 'FUSION';
+            app.FUSIONButton.Position = [375 196 100 22];
+            app.FUSIONButton.Value = true;
+        end
+    end
+
+    methods (Access = public)
+
+        % Construct app
+        function app = SOLINDAR
+
+            % Create and configure components
+            createComponents(app)
+
+            % Register the app with App Designer
+            registerApp(app, app.UIFigure)
+
+            % Execute the startup function
+            runStartupFcn(app, @startupFcn)
+
+            if nargout == 0
+                clear app
+            end
+        end
+
+        % Code that executes before app deletion
+        function delete(app)
+
+            % Delete UIFigure when app is deleted
+            delete(app.UIFigure)
+        end
+    end
+end
